@@ -1,0 +1,353 @@
+---
+title: "Predict Graduate Admission Application with Linear Regression"
+author: "M Asadullah Al Ghozi"
+date: "4/19/2021"
+output: 
+  html_document:
+    df_print: paged
+    theme: journal
+    highlight: default
+    toc: true
+    toc_depth : 2
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+```{r, out.width = "100%", echo = FALSE, fig.align = "center"}
+knitr::include_graphics("blog_20171031_iStock_36808402.jpg")
+```
+
+This notebook is a notebook that try to predict a graduate admission application based on several factors using linear regression model. Data is retrieved from Kaggle.com and inspired by the UCLA Graduate Dataset. Thus, this dataset is a real cases from a university in Untied States. Main goal of this analysis is to predict the chance of a student admitted in this university based on several variables.
+
+The explanation consists of Data Preparation, Exploratory Data Analysis, making the models, evaluations of models, assumptions checking, and conclusion.
+
+# Data Preparation
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(GGally)
+library(car)
+library(caret)
+library(scales)
+library(lmtest)
+library(MLmetrics)
+library(dplyr)
+
+options(scipen = 100, max.print = 1e+06)
+```
+
+```{r}
+adm <- read.csv("Admission_Predict_Ver1.1.csv")
+head(adm)
+```
+
+
+```{r}
+str(adm)
+```
+
+Data constructed by 9 columns, and 500 rows.   
+
+1. `Serial.No` = No ID of each application   
+2. `GRE.Score` = GRE Scores ( out of 340 )   
+3. `TOEFL.Score` = TOEFL Scores ( out of 120 )   
+4. `University.Rating` = Bachelor's University Rating ( out of 5 )   
+5. `SOP`= Statement of Purpose Strength ( out of 5 )   
+6. `LOR` = Letter of Recommendation Strength ( out of 5 )   
+7. `CGPA` = Undergraduate GPA ( out of 10 )   
+8. `Research` = Research Experience ( either 0 or 1 )   
+9. `Chance.of.Admit` = Chance of Admit ( ranging from 0 to 1 )   
+
+From 9 columns, `GRE.Scores`, `TOELF.Scores`, and `CGPA` are contiuous variable; and other variables are considered categorical factor. Although `SOP`, `LOR`, `Research`, `University.Rating` in form of number, they still categorical variable. `Chance.of.Admit` in this case is the target variable. `Serial.No` will be omitted and not used.
+
+
+```{r}
+# Change Research to factor
+adm2 <- adm %>%
+  select(-Serial.No.) %>% 
+  mutate(Research = as.factor(Research))
+```
+
+
+```{r}
+# Check NA Value
+anyNA(adm2)
+```
+
+```{r}
+# Check Summary 
+summary(adm2)
+```
+
+
+# Exploratory Data Analysis  
+
+## Data Distribution 
+
+```{r fig.width=10, fig.asp=1, warning=FALSE, message=FALSE}
+adm_long <- adm %>% 
+  select(-Research) %>% 
+  pivot_longer(-Serial.No.)
+
+ggplot(data = adm_long, aes(x = name, y = value, fill = name)) +
+  geom_boxplot() +
+  facet_wrap(facets = ~name, scales = 'free')
+```
+Facet boxplot above shows distribution of data for each column or variable. There are only 2 variable that have outlier: LOR and Chance.of.Admit. Majority of the data is distributed between Q3 to Q1. 
+
+## Correlation
+
+Before make the model, Exploratory Data Analysis is needed to explain relations between predictors and target. In this case, predictors are all variable except Chance.of.Admit. And the target is Chance.of.Admit. The form of target variable is in the form of likelihood. Closer to 1 means high chance of accepted, and reverse.   
+
+```{r fig1, fig.width=10, fig.asp=1, warning=FALSE, message=FALSE}
+ggcorr(data = adm2, label = T) +
+  labs(title = "Correlation Matrix")
+```
+All variables seemed have correlation with the target `Change.of.Admit` with positive direction. The highest variable correlate with target is bachelor's CGPA. Another predictors have high correlation scoree 0.8 - 0.6. In this Correlation matrix, `Research` is excluded because its data type is categorical (or factor in R). For each predictor variables also have strong correlation. For example, `CGPA` with `TOEFL.Score` and `CGPA` with `GRE.Score`. It is natural if a student graduate with high CGPA might also have excellent score in TOEFL and GRE.   
+
+Chart below shows the coefficient correlation, data distribution, and scatter.   
+
+```{r, fig.width=10, fig.asp=1, warning=FALSE, message=FALSE}
+library(psych)
+pairs.panels(adm2,
+             method = "spearman",
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE
+             )
+```
+This chart emphasize more that every predictors has good enough correlation with target variable. 
+
+## Cross Validation  
+
+
+```{r warning=FALSE}
+# Split the data with 80:20 proportion
+RNGkind(sample.kind = "Rounding")
+set.seed(99)
+adm_split <- sample(nrow(adm2), nrow(adm)*0.8)
+adm_train <- adm2[adm_split,]
+adm_test <- adm2[-adm_split,]
+
+# Dimension of Train and Test data
+dim(adm_train)
+dim(adm_test)
+```
+
+
+
+# Linear Regression Model
+
+Before going to sophisticated model, I want to make a simple model with one predictor and target so at the end, simple and complex model are comparable.   
+
+## Single Predictor CGPA  
+```{r}
+# Simple Linear Regression
+model_simple <- lm(formula = Chance.of.Admit ~ CGPA, data = adm_train)
+summary(model_simple)
+```
+### Interpretation
+From the summary above, the estimate intercept is -0.99, and estimate CGPA is 0.2. Intercept means that when the CGPA is 0, the chance of accepted is -0.99 which likely will not to be accepted. Adjusted R-squared of 0.79 means that this model explain approximately 79% of all data. Therefore, the equation could be written in form:   
+
+$$
+Y_i = -0.99 + 0.2 \beta_i
+$$
+
+## Multiple Predictors with Stepwise Backward Regression  
+
+In purpose for optimizing significant predictors, multiple linear regression will use stepwise backward regression.
+
+```{r}
+# Stepwise Backward Regression Model
+model_adm <- lm(formula = Chance.of.Admit ~ ., data = adm_train)
+model_adm_back <- step(object = model_adm, direction = "backward", trace = F)
+summary(model_adm_back)
+```
+
+### Interpretation
+From 6 predictors, 5 variables are significant and only 1 variable `SOP` that not significant. The model haave Adj R-squared and Multiple R-Squared score both 0.83 (2 decimals). The equation is below:
+
+$$
+Y_i = -1.27 + 0.001 GRE.Score_i + 0.002 TOEFL.Score_i + 0.014 LOR_i +0.115 CGPA_i + 0.026 Research_i
+$$
+
+## Model Comparison  
+
+```{r echo=FALSE}
+Score <- c("Multiple R-Squared")
+Simple_Model <- summary(model_simple)$r.squared
+Multi_Predictor <- summary(model_adm_back)$r.squared
+df <- data.frame(Score, Simple_Model, Multi_Predictor)
+df
+```
+
+Comparison table given explain that Multi Predictor model has better Multiple R-Squared score rather than the simple one. Therefore, for another analysis and prediction, I will use the multi predictor model or `model_adm_back`.
+
+
+# Model Evaluation
+
+```{r}
+# Predicting testing data to the model
+predicted_mv <- predict(object = model_adm_back, newdata = adm_test)
+
+# Using MAE to calculate the error
+MAE(y_pred = predicted_mv, y_true = adm_test$Chance.of.Admit)
+```
+For model evaluation, I use MAE (Mean Absolute Error) because the data are normally distributed and its characteristic of less-affected by the outlier. The MAE score of this model is 0.053 which means that the model have good prediction.
+
+
+# Assumptions in Linear Regression
+
+## Linearity
+
+Linearity assumption expects that every predictor variable has correlation with the target variable. 
+```{r warning=FALSE}
+linearity <- data.frame(residual = model_adm_back$residuals, fitted = model_adm_back$fitted.values)
+linearity %>% ggplot(aes(fitted, residual)) + geom_point() + geom_hline(aes(yintercept = 0)) + 
+    geom_smooth() + theme(panel.grid = element_blank(), panel.background = element_blank())
+```
+
+The pattern is shown by the graph. The data distributed in 0 residuals and 0.5 - 0.8 fitted point. More points getting smaller (negative) as the fitted getting higher, but then it converges to X axis.   
+
+## Normality Error/Residual
+
+
+```{r}
+hist(model_adm_back$residuals)
+```
+Histogram shows that the data is right skewed. This is strong signal for non-normal residual distribution. For examining the score, I use Shapiro-Wilk Test.
+
+```{r}
+shapiro.test(model_adm_back$residuals)
+```
+P-value given by the Shapiro-Wilk normality test is less than alpha 0.05. Therefore, **the model is indicating non-normally distributed residuals.**
+
+## Homoscedasticity
+
+Homoscedasticity means the homogenity of variances. It assume of equal or similar variances in different groups that compared. When there is variance of variances, it is called Heteroscedasticity.
+
+```{r}
+bptest(model_adm_back)
+```
+Breusch-Pagan coefficient given shows the p-value is less than alpha (0.05). Therefore the model is indicating of heteroscedasticity.
+
+## No-multicolinearity
+No-multicolinearity assumption expect that each variable or column does not affect each other (in particular, no correlation between consecutive errors in the case of time series data). This assumption also called test of independency.
+
+```{r}
+vif(model_adm_back)
+```
+Based on the [reference](https://www.statisticssolutions.com/assumptions-of-linear-regression/), VIF score > 5 means there is an indication that multicolinearity may be present, and VIF > 10 indicates certainly multicollinearity among the variables.
+
+# Data Transformation
+
+From 4 assumptions, only 2 assumptions that fulfilled. Homoscedasticity and Normality are violated. if this model is used to make prediction, the result will be misleading. 
+
+Based on this [article](http://people.duke.edu/~rnau/testing.htm), alternative for fixing the model is to transform the dependent and/or independent variables with logarithm function. The next model, I am trying to transfrom dependent variable and use it to predict the target. The related article above suggest that: "If a log transformation is applied to the dependent variable only, this is equivalent to assuming that it grows (or decays) exponentially as a function of the independent variables."
+
+## Data Transformation and Cross Validation  
+```{r}
+# Log10 transformation
+adm3 <- adm %>%
+  select(-Serial.No.) %>% # unselect Serial.No
+  mutate(GRE.Score = log10(GRE.Score),
+         TOEFL.Score = log10(TOEFL.Score),
+         University.Rating = log10(University.Rating),
+         SOP = log10(SOP),
+         LOR = log10(LOR),
+         CGPA = log10(CGPA))
+head(adm3) # Research is not transformed due to factor data type
+```
+```{r}
+# Cross Validation
+set.seed(99)
+adm_train3 <- adm3[adm_split,]
+adm_test3 <- adm3[-adm_split,]
+```
+
+
+## Modelling and Evaluation  
+To create a model, the `lm()` function is used by filling in the target variable, predictor variable, and train data. This second model uses a data train whose predictor variables have been converted into logarithmic form.
+```{r}
+# Modelling
+model_logx = lm(formula = Chance.of.Admit ~., data = adm_train3)
+summary(model_logx)
+```
+
+Perform model predictions with test data.
+```{r}
+# Predicting
+predict_logx <- predict(object = model_logx, newdata = adm_test3)
+
+# Model evaluation
+MAE(y_pred = predict_logx, y_true = adm_test3$Chance.of.Admit)
+```
+
+
+## Assumption Checking  
+
+Since only two assumptions violated, this section only focus on Normality and Homoscedasticity assumption to test new model.
+
+### Normality 
+```{r}
+hist(model_logx$residuals)
+```
+The histogram shows the distribution of residuals skewed to the right.
+
+```{r}
+shapiro.test(model_logx$residuals)
+```
+P-value that less than 0.05 (alpha) indicates that the model also violates normality test. p-value score confirm histogram visualization.   
+
+### Homoscedasticity
+
+```{r}
+bptest(model_logx)
+```
+Using Breusch-Pagan test, p-value that given less than 0.05 (alpha value) indicates that the model violates Homoscedasticity assumption. 
+
+
+# Conclusion
+
+Of the several predictor variables, GRE score, TOEFL score, CGPA, and research experience are significant factors in predicting a person's chance of passing university registration or not. Academic measure is commonly used to select applications.   
+
+The correlation value shows that all variables have a strong correlation with the target variable. Between independent variables also has a high correlation.   
+
+The linear model that has been made is able to provide predictions. However, in linear regression, prediction alone is not sufficient. Linear models must also meet the assumptions. If these assumptions are not met, it is likely that the resulting predictions will be misleading.   
+
+In the first model, the assumptions for normality and homoscedasticity are not fulfilled. To solve this model, one way is to convert one of the variables (independent or dependent) into a log, to ensure that the variable relationship is linear.   
+
+Then a second model is created by converting the independent variables. After testing the assumptions that are focused on the two previous tests, it is found that the second model does not fulfill these two assumptions.
+
+## Alternative
+It can be assumed that the linear model is not match for predicting the probability of acceptance of university applications or not. Alternatives that can be done is to use a non-linear model, perform PCA analysis as pre-processing, or use a linear regression model or method that can solve problems in the OLS model.
+
+
+# References
+
+Mohan S Acharya, Asfia Armaan, Aneeta S Antony : A Comparison of Regression Models for Prediction of Graduate Admissions, IEEE International Conference on Computational Intelligence in Data Science 2019
+
+https://www.statisticssolutions.com/assumptions-of-linear-regression/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
